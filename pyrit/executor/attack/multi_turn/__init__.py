@@ -19,6 +19,13 @@ from pyrit.executor.attack.multi_turn.tree_of_attacks import (
     TAPAttackResult,
     TAPAttackContext,
 )
+from pyrit.executor.attack.multi_turn.multi_branch_attack import (
+    MultiBranchAttack,
+    MultiBranchAttackContext,
+    MultiBranchAttackResult,
+    ConversationNode,
+    MultiBranchCommand,
+)
 
 __all__ = [
     "ConversationSession",
@@ -35,4 +42,9 @@ __all__ = [
     "TAPAttack",
     "TAPAttackResult",
     "TAPAttackContext",
+    "MultiBranchAttack",
+    "MultiBranchAttackContext",
+    "MultiBranchAttackResult",
+    "ConversationNode",
+    "MultiBranchCommand",
 ]

@@ -488,6 +488,86 @@ class MemoryInterface(abc.ABC):
         self.add_request_pieces_to_memory(request_pieces=prompt_pieces)
 
         return new_conversation_id
+    
+    def duplicate_conversation_turns(
+        self, *, conversation_id: str, turns: int, new_orchestrator_id: Optional[str] = None
+    ) -> str:
+        """
+        Duplicate a conversation, including only the first specified number of turns.
+        
+        A turn is defined as a user message and its corresponding assistant/system response.
+        For partial turns (e.g., only a user message without response), the partial turn is included.
+
+        This can be useful when you want to branch from a specific point in a conversation.
+
+        Args:
+            conversation_id (str): The conversation ID with existing conversations.
+            turns (int): The number of turns to duplicate from the beginning of the conversation.
+                Must be a positive integer.
+            new_orchestrator_id (Optional[str]): The new orchestrator ID to assign to the duplicated conversations.
+                If no new orchestrator ID is provided, the orchestrator ID will remain the same. Defaults to None.
+                
+        Returns:
+            str: The UUID for the new conversation.
+            
+        Raises:
+            ValueError: If turns is not a positive integer.
+            ValueError: If the new orchestrator ID is the same as the existing orchestrator ID.
+        """
+        if not isinstance(turns, int) or turns < 1:
+            raise ValueError("The 'turns' parameter must be a positive integer.")
+            
+        new_conversation_id = str(uuid.uuid4())
+        
+        # Deep copy objects to prevent any mutability-related issues that could arise due to in-memory databases.
+        prompt_pieces = copy.deepcopy(self.get_prompt_request_pieces(conversation_id=conversation_id))
+        
+        # If no prompt pieces exist, return empty conversation
+        if not prompt_pieces:
+            return new_conversation_id
+        
+        # Sort pieces by sequence to ensure correct order
+        sorted_pieces = sorted(prompt_pieces, key=lambda x: x.sequence)
+        
+        # Calculate the maximum sequence number to include based on turns
+        max_sequence_to_include = 0
+        current_turn = 0
+        current_sequence = -1
+        
+        for piece in sorted_pieces:
+            # When we encounter a new sequence with a user role, it's a new turn
+            if piece.sequence > current_sequence and piece.role == "user":
+                current_turn += 1
+                if current_turn > turns:
+                    break
+            
+            # Update the maximum sequence to include all pieces of the current turn
+            if current_turn <= turns:
+                max_sequence_to_include = piece.sequence
+                current_sequence = piece.sequence
+        
+        # Filter prompt pieces to include only those within the specified turns
+        prompt_pieces_to_duplicate = [
+            piece for piece in prompt_pieces if piece.sequence <= max_sequence_to_include
+        ]
+        
+        # Update the pieces with new IDs and orchestrator ID
+        for piece in prompt_pieces_to_duplicate:
+            # Assign duplicated piece a new ID, but note that the `original_prompt_id` remains the same.
+            piece.id = uuid.uuid4()
+            
+            if new_orchestrator_id:
+                if piece.orchestrator_identifier["id"] == new_orchestrator_id:
+                    raise ValueError("The new orchestrator ID must be different from the existing orchestrator ID.")
+                piece.orchestrator_identifier["id"] = new_orchestrator_id
+                
+            piece.conversation_id = new_conversation_id
+        
+        # Add the duplicated pieces to memory
+        if prompt_pieces_to_duplicate:
+            self.add_request_pieces_to_memory(request_pieces=prompt_pieces_to_duplicate)
+        
+        return new_conversation_id
 
     def add_request_response_to_memory(self, *, request: PromptRequestResponse) -> None:
         """
