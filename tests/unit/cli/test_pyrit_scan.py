@@ -1543,7 +1543,7 @@ class TestScenarioResults:
         assert "give me data" in out
         assert "Conversations" in out
 
-    def test_handle_results_full_prints_table_then_transcripts(self, capsys):
+    def test_handle_results_full_prints_overview_then_transcripts(self, capsys):
         import asyncio
 
         client = AsyncMock()
@@ -1553,8 +1553,9 @@ class TestScenarioResults:
         rc = asyncio.run(pyrit_scan._handle_results_async(client=client, parsed_args=parsed))
         assert rc == 0
         out = capsys.readouterr().out
-        assert "Attack Results" in out
+        assert "SCENARIO RESULTS" in out
         assert "Conversations" in out
+        assert "▼ Attack Results" not in out
 
     def test_handle_results_conversations_reports_fetch_error(self, capsys):
         import asyncio

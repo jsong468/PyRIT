@@ -1068,14 +1068,15 @@ class TestDoScenarioResults:
         assert "do it" in out
         assert client.get_conversation_messages_async.await_count == 2
 
-    def test_full_view_prints_table_then_transcripts(self, shell, capsys):
+    def test_full_view_prints_overview_then_transcripts(self, shell, capsys):
         s, client = shell
         client.get_scenario_run_results_async = AsyncMock(return_value=_attacks_scenario_result())
         client.get_conversation_messages_async = AsyncMock(return_value={"messages": []})
         s.do_scenario_results("rid-1 --view full")
         out = capsys.readouterr().out
-        assert "Attack Results" in out
+        assert "SCENARIO RESULTS" in out
         assert "Conversations" in out
+        assert "▼ Attack Results" not in out
 
     def test_conversations_view_reports_fetch_error(self, shell, capsys):
         s, client = shell

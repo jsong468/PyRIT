@@ -850,6 +850,7 @@ async def _handle_results_async(*, client: Any, parsed_args: Namespace) -> int:
     scenario_result_id = parsed_args.scenario_result_id
     view = resolve_view(view=parsed_args.view)
     limit = apply_view_limit_policy(view=view, limit=parsed_args.limit, attack_result_ids=parsed_args.attack_result_ids)
+    fmt = parsed_args.format
 
     try:
         result = await client.get_scenario_run_results_async(scenario_result_id=scenario_result_id)
@@ -858,26 +859,37 @@ async def _handle_results_async(*, client: Any, parsed_args: Namespace) -> int:
         return 1
 
     if view is ScenarioResultView.OVERVIEW:
-        await _output.print_scenario_result_async(result=result)
+        await _output.print_scenario_result_async(result=result, format=fmt)
         return 0
 
-    if view in (ScenarioResultView.ATTACKS, ScenarioResultView.FULL):
+    if view is ScenarioResultView.ATTACKS:
         await output_scenario_attacks_async(
             result,
             attack_result_ids=parsed_args.attack_result_ids,
             limit=limit,
+            format=fmt,
         )
-        if view is ScenarioResultView.ATTACKS:
-            return 0
+        return 0
 
     try:
-        await _output.print_conversations_async(
-            result=result,
-            client=client,
-            scenario_result_id=scenario_result_id,
-            attack_result_ids=parsed_args.attack_result_ids,
-            limit=limit,
-        )
+        if view is ScenarioResultView.FULL:
+            await _output.print_full_async(
+                result=result,
+                client=client,
+                scenario_result_id=scenario_result_id,
+                format=fmt,
+                attack_result_ids=parsed_args.attack_result_ids,
+                limit=limit,
+            )
+        else:
+            await _output.print_conversations_async(
+                result=result,
+                client=client,
+                scenario_result_id=scenario_result_id,
+                format=fmt,
+                attack_result_ids=parsed_args.attack_result_ids,
+                limit=limit,
+            )
     except Exception as exc:
         _print_cli_exception(exc=exc)
         return 1

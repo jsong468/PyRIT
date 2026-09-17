@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Literal
 
-OutputFormat = Literal["pretty", "markdown"]
+OutputFormat = Literal["pretty", "markdown", "json"]
 
 
 class Sink(ABC):
