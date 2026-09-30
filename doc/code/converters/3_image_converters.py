@@ -21,6 +21,7 @@
 # - **[Image to Image](#image-to-image)**: Modify or transform existing images
 
 # %% [markdown]
+# (text-to-image)=
 # ## Text to Image
 #
 #
