@@ -15,10 +15,10 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple, TypeVar, cast
 from urllib.parse import urlparse
 
-from sqlalchemy import MetaData, and_, case, exists, func, literal, not_, or_, select, update
+from sqlalchemy import MetaData, and_, case, exists, false, func, literal, not_, or_, select, update
 from sqlalchemy.engine.base import Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import joinedload
@@ -1844,17 +1844,21 @@ class MemoryInterface(abc.ABC):
         *,
         scores: Sequence[Score],
         observations: Sequence[Observation] = (),
+        intermediate_scores: Sequence[Score] = (),
     ) -> None:
         """
         Persist scores whose loose-content anchors need no asynchronous file copy.
 
         File-backed ``ContentScorable`` values must use ``add_scores_to_memory_async``
         so the source bytes can be copied into managed results storage.
+        ``intermediate_scores`` are results of nested scorers at any depth. They share the
+        transaction but are excluded from default score queries.
         """
         self._add_scores_to_memory(
-            scores=scores,
+            scores=[*scores, *intermediate_scores],
             observations=observations,
             prepared_content_hashes={},
+            intermediate_score_ids=frozenset(str(score.id) for score in intermediate_scores),
         )
 
     async def add_scores_to_memory_async(
@@ -1862,22 +1866,27 @@ class MemoryInterface(abc.ABC):
         *,
         scores: Sequence[Score],
         observations: Sequence[Observation] = (),
+        intermediate_scores: Sequence[Score] = (),
     ) -> None:
         """
         Prepare file-backed loose content, then persist scores and observations.
 
+        ``intermediate_scores`` are results of nested scorers at any depth. They share the
+        transaction but are excluded from default score queries.
+
         Raises:
             ValueError: If an observation does not match its scored content.
         """
+        all_scores = [*scores, *intermediate_scores]
         media_scorables = list(
             dict.fromkeys(
                 score.scorable
-                for score in scores
+                for score in all_scores
                 if isinstance(score.scorable, ContentScorable) and score.scorable.data_type in MEDIA_PATH_DATA_TYPES
             )
         )
         if not media_scorables:
-            self.add_scores_to_memory(scores=scores, observations=observations)
+            self.add_scores_to_memory(scores=scores, observations=observations, intermediate_scores=intermediate_scores)
             return
 
         prepared_content = await asyncio.gather(
@@ -1888,7 +1897,7 @@ class MemoryInterface(abc.ABC):
 
         copied_scores: list[tuple[Score, Score]] = []
         scores_to_persist: list[Score] = []
-        for score in scores:
+        for score in all_scores:
             scorable = score.scorable
             prepared = prepared_by_source.get(scorable) if isinstance(scorable, ContentScorable) else None
             if prepared is None:
@@ -1902,6 +1911,7 @@ class MemoryInterface(abc.ABC):
             scores=scores_to_persist,
             observations=observations,
             prepared_content_hashes=prepared_hashes,
+            intermediate_score_ids=frozenset(str(score.id) for score in intermediate_scores),
         )
         for original_score, copied_score in copied_scores:
             original_score.scorable = copied_score.scorable
@@ -1949,6 +1959,7 @@ class MemoryInterface(abc.ABC):
         scores: Sequence[Score],
         observations: Sequence[Observation],
         prepared_content_hashes: Mapping[ContentScorable, str],
+        intermediate_score_ids: frozenset[str] = frozenset(),
     ) -> None:
         """
         Insert a list of scores into the memory storage.
@@ -1988,7 +1999,12 @@ class MemoryInterface(abc.ABC):
                 session.add_all(content_entries)
                 session.flush()
                 self._validate_observation_evidence(session=session, observations=persisted_observations)
-                self._persist_score_rows(session=session, scores=persisted_scores, observations=persisted_observations)
+                self._persist_score_rows(
+                    session=session,
+                    scores=persisted_scores,
+                    observations=persisted_observations,
+                    intermediate_score_ids=intermediate_score_ids,
+                )
                 session.commit()
             except SQLAlchemyError:
                 session.rollback()
@@ -2102,10 +2118,15 @@ class MemoryInterface(abc.ABC):
         return content_entries, persisted_scores, persisted_observations
 
     def _persist_score_rows(
-        self, *, session: Session, scores: Sequence[Score], observations: Sequence[Observation]
+        self,
+        *,
+        session: Session,
+        scores: Sequence[Score],
+        observations: Sequence[Observation],
+        intermediate_score_ids: frozenset[str] = frozenset(),
     ) -> None:
         """Build score, observation, identifier, and ordered-link rows in one session."""
-        entries = [ScoreEntry(entry=score) for score in scores]
+        entries = [ScoreEntry(entry=score, is_intermediate=str(score.id) in intermediate_score_ids) for score in scores]
         observation_entries = [ObservationEntry(entry=observation) for observation in observations]
         observation_message_links = [
             ObservationMessagePieceEntry(
@@ -2354,6 +2375,7 @@ class MemoryInterface(abc.ABC):
         sent_after: datetime | None = None,
         sent_before: datetime | None = None,
         identifier_filters: Sequence[IdentifierFilter] | None = None,
+        include_intermediate: bool = False,
     ) -> Sequence[Score]:
         """
         Retrieve a list of Score objects based on the specified filters.
@@ -2366,6 +2388,7 @@ class MemoryInterface(abc.ABC):
             sent_before (datetime | None): Filter for scores sent before this datetime.
             identifier_filters (Sequence[IdentifierFilter] | None): A sequence of IdentifierFilter objects that
                 allows filtering by various scorer identifier JSON properties. Defaults to None.
+            include_intermediate (bool): Include nested results in filtered queries. Explicit IDs always include them.
 
         Returns:
             Sequence[Score]: A list of Score objects that match the specified filters.
@@ -2408,6 +2431,8 @@ class MemoryInterface(abc.ABC):
             no_condition_scores: list[Score] = []
             return no_condition_scores
 
+        if not include_intermediate:
+            conditions.append(ScoreEntry.is_intermediate == false())
         score_entries: Sequence[ScoreEntry] = self._query_entries(ScoreEntry, conditions=and_(*conditions))
         return [entry.get_score() for entry in score_entries]
 
@@ -2426,6 +2451,7 @@ class MemoryInterface(abc.ABC):
         data_type: str | None = None,
         not_data_type: str | None = None,
         converted_value_sha256: Sequence[str] | None = None,
+        include_intermediate: bool = False,
     ) -> Sequence[Score]:
         """
         Retrieve scores attached to message pieces based on the specified filters.
@@ -2446,6 +2472,7 @@ class MemoryInterface(abc.ABC):
             not_data_type (str | None, optional): The data type to exclude. Defaults to None.
             converted_value_sha256 (Sequence[str] | None, optional): A list of SHA256 hashes of converted values.
                 Defaults to None.
+            include_intermediate (bool): Include nested judgments instead of only public root results.
 
         Returns:
             Sequence[Score]: A list of scores extracted from the message pieces.
@@ -2476,7 +2503,7 @@ class MemoryInterface(abc.ABC):
             ScoreEntry,
             batch_column=ScoreEntry.prompt_request_response_id,
             batch_values=list(original_ids),
-            other_conditions=[],
+            other_conditions=[] if include_intermediate else [ScoreEntry.is_intermediate == false()],
         )
         entries_by_id = {entry.id: entry for entry in score_entries}
 
@@ -2490,6 +2517,8 @@ class MemoryInterface(abc.ABC):
                 array_to_match=batch,
                 match_mode="any",
             )
+            if not include_intermediate:
+                scorable_condition = and_(scorable_condition, ScoreEntry.is_intermediate == false())
             anchored_entries = self._query_entries(ScoreEntry, conditions=scorable_condition)
             entries_by_id.update({entry.id: entry for entry in anchored_entries})
 
@@ -2819,7 +2848,13 @@ class MemoryInterface(abc.ABC):
         self.add_message_pieces_to_memory(message_pieces=message_pieces)
 
         if self.memory_embedding:
-            for piece in message_pieces:
+            # Embeddings power text similarity search and only describe text pieces.
+            # A multimodal message (e.g. text plus an image_path piece) must still
+            # persist instead of failing the whole write, and pieces flagged
+            # not_in_memory are never persisted, so no embedding row may reference them.
+            for piece in pieces_to_persist:
+                if piece.converted_value_data_type != "text":
+                    continue
                 embedding_entry = self.memory_embedding.generate_embedding_memory_data(message_piece=piece)
                 embedding_entries.append(embedding_entry)
 
@@ -3047,8 +3082,10 @@ class MemoryInterface(abc.ABC):
         Args:
             value (str): The value to match. By default this matches by substring; pass exact=True to
                 require full-string equality instead. If None, all values are returned.
-            exact (bool): When True, ``value`` is matched by full-string equality rather than substring.
-                Has no effect unless ``value`` is provided. Defaults to False (substring matching).
+            exact (bool): When True, ``value`` is matched by full-string equality rather than substring,
+                and ``harm_categories``, ``authors``, ``groups`` and ``parameters`` must match whole list
+                elements (case-insensitive) rather than substrings of the stored list. Defaults to False
+                (substring matching).
             value_sha256 (Sequence[str] | None): A list of SHA256 hashes of values to match.
                 If None, all values are returned.
             dataset_name (str): The dataset name to match exactly. If None, all dataset names are considered.
@@ -3104,12 +3141,14 @@ class MemoryInterface(abc.ABC):
         elif seed_type is not None:
             conditions.append(SeedEntry.seed_type == seed_type)
 
-        self._add_list_conditions(field=SeedEntry.harm_categories, values=harm_categories, conditions=conditions)
-        self._add_list_conditions(field=SeedEntry.authors, values=authors, conditions=conditions)
-        self._add_list_conditions(field=SeedEntry.groups, values=groups, conditions=conditions)
+        self._add_list_conditions(
+            field=SeedEntry.harm_categories, values=harm_categories, conditions=conditions, exact=exact
+        )
+        self._add_list_conditions(field=SeedEntry.authors, values=authors, conditions=conditions, exact=exact)
+        self._add_list_conditions(field=SeedEntry.groups, values=groups, conditions=conditions, exact=exact)
 
         if parameters:
-            self._add_list_conditions(field=SeedEntry.parameters, values=parameters, conditions=conditions)
+            self._add_list_conditions(field=SeedEntry.parameters, values=parameters, conditions=conditions, exact=exact)
 
         if metadata:
             conditions.append(self._get_seed_metadata_conditions(metadata=metadata))
@@ -3229,10 +3268,11 @@ class MemoryInterface(abc.ABC):
             value (str): The value to match. For the remove methods this defaults to full-string equality
                 (exact=True) so a short or common value does not delete far more seeds than intended; pass
                 exact=False to match by substring instead. If None, all values are considered.
-            exact (bool): When True, ``value`` is matched by full-string equality rather than substring.
-                Has no effect unless ``value`` is provided. Defaults to True for the remove methods (the
-                safer choice for deletion). Note this differs from get_seeds, which always matches ``value``
-                by substring.
+            exact (bool): When True, ``value`` is matched by full-string equality rather than substring, and
+                ``harm_categories``, ``authors``, ``groups`` and ``parameters`` must match whole list elements
+                (case-insensitive), so ``harm_categories=["hate"]`` does not also remove seeds tagged
+                ``"hate_speech"``. Defaults to True for the remove methods (the safer choice for deletion).
+                Note this differs from get_seeds, which always matches these filters by substring.
             value_sha256 (Sequence[str] | None): A list of SHA256 hashes of values to match.
                 If None, all values are considered.
             dataset_name (str): The dataset name to match exactly. If None, all dataset names are considered.
@@ -3246,9 +3286,9 @@ class MemoryInterface(abc.ABC):
             all harm categories are considered.
                 Specifying multiple harm categories matches only prompts that are marked with all harm categories.
             added_by (str): The user who added the prompts.
-            authors (Sequence[str]): A list of authors to filter by.
-                Note that this filters by substring, so a query for "Adam Jones" may not return results if the record
-                is "A. Jones", "Jones, Adam", etc. If None, all authors are considered.
+            authors (Sequence[str]): A list of authors to filter by. With exact=True (the default) each author
+                must match a stored author exactly (case-insensitive); with exact=False this filters by substring.
+                If None, all authors are considered.
             groups (Sequence[str]): A list of groups to filter by. If None, all groups are considered.
             source (str): The source to filter by. If None, all sources are considered.
             seed_type (SeedType): The type of seed to filter by ("prompt", "objective", or
@@ -3344,10 +3384,11 @@ class MemoryInterface(abc.ABC):
             value (str): The value to match. For the remove methods this defaults to full-string equality
                 (exact=True) so a short or common value does not delete far more seeds than intended; pass
                 exact=False to match by substring instead. If None, all values are considered.
-            exact (bool): When True, ``value`` is matched by full-string equality rather than substring.
-                Has no effect unless ``value`` is provided. Defaults to True for the remove methods (the
-                safer choice for deletion). Note this differs from get_seeds, which always matches ``value``
-                by substring.
+            exact (bool): When True, ``value`` is matched by full-string equality rather than substring, and
+                ``harm_categories``, ``authors``, ``groups`` and ``parameters`` must match whole list elements
+                (case-insensitive), so ``harm_categories=["hate"]`` does not also remove seeds tagged
+                ``"hate_speech"``. Defaults to True for the remove methods (the safer choice for deletion).
+                Note this differs from get_seeds, which always matches these filters by substring.
             value_sha256 (Sequence[str] | None): A list of SHA256 hashes of values to match.
                 If None, all values are considered.
             dataset_name (str): The dataset name to match exactly. If None, all dataset names are considered.
@@ -3361,9 +3402,9 @@ class MemoryInterface(abc.ABC):
             all harm categories are considered.
                 Specifying multiple harm categories matches only prompts that are marked with all harm categories.
             added_by (str): The user who added the prompts.
-            authors (Sequence[str]): A list of authors to filter by.
-                Note that this filters by substring, so a query for "Adam Jones" may not return results if the record
-                is "A. Jones", "Jones, Adam", etc. If None, all authors are considered.
+            authors (Sequence[str]): A list of authors to filter by. With exact=True (the default) each author
+                must match a stored author exactly (case-insensitive); with exact=False this filters by substring.
+                If None, all authors are considered.
             groups (Sequence[str]): A list of groups to filter by. If None, all groups are considered.
             source (str): The source to filter by. If None, all sources are considered.
             seed_type (SeedType): The type of seed to filter by ("prompt", "objective", or
@@ -3431,11 +3472,25 @@ class MemoryInterface(abc.ABC):
 
     def _add_list_conditions(
         self,
+        *,
         field: InstrumentedAttribute[Any],
         conditions: "list[ColumnElement[bool]]",
         values: Sequence[str] | None = None,
+        exact: bool = False,
     ) -> None:
-        if values:
+        if not values:
+            return
+        if exact:
+            # Match whole list elements (case-insensitive) so "hate" does not match "hate_speech" or "whatever".
+            conditions.append(
+                self._get_condition_json_array_match(
+                    json_column=field,
+                    property_path="$",
+                    array_to_match=list(values),
+                    match_mode="all",
+                )
+            )
+        else:
             conditions.extend(field.contains(value) for value in values)
 
     async def _serialize_seed_value_async(self, prompt: Seed) -> str:
@@ -4775,7 +4830,8 @@ class MemoryInterface(abc.ABC):
         for (labels,) in are_rows:
             if not isinstance(labels, dict):
                 continue
-            for key, value in labels.items():
+            # Persisted JSON can contain legacy values outside the ORM's declared type.
+            for key, value in cast("Mapping[str, object]", labels).items():
                 if key in {"operator", "operation"}:
                     continue
                 if isinstance(value, str):
@@ -4794,6 +4850,7 @@ class MemoryInterface(abc.ABC):
                 .filter(AttackResultEntry.operator.isnot(None))
                 .distinct()
                 .all()
+                if value is not None
             ]
             operations = [
                 value
@@ -4801,6 +4858,7 @@ class MemoryInterface(abc.ABC):
                 .filter(AttackResultEntry.operation.isnot(None))
                 .distinct()
                 .all()
+                if value is not None
             ]
         return {"operators": sorted(operators), "operations": sorted(operations)}
 
@@ -5081,106 +5139,23 @@ class MemoryInterface(abc.ABC):
         Raises:
             ValueError: If the limit, cursor ID, or label keys are invalid.
         """
-        if limit < 1 or limit > 100:
-            raise ValueError("Scenario history limit must be between 1 and 100.")
+        from pyrit.memory._scenario_history import _ScenarioHistoryQueries
 
-        conditions: list[Any] = []
-        effective_names = sorted({name.strip() for name in scenario_names or [] if name.strip()})
-        if effective_names:
-            conditions.append(
-                or_(
-                    ScenarioResultEntry.scenario_name.in_(effective_names),
-                    self._get_scenario_registry_name_condition(scenario_names=effective_names),
-                )
-            )
-        effective_statuses = sorted({status.strip().upper() for status in statuses or [] if status.strip()})
-        if effective_statuses:
-            conditions.append(ScenarioResultEntry.scenario_run_state.in_(effective_statuses))
-        effective_labels = {
-            key: value
-            for key, value in (labels or {}).items()
-            if (isinstance(value, str) and value) or (not isinstance(value, str) and len(value) > 0)
-        }
-        invalid_keys = sorted(key for key in effective_labels if not self._LABEL_KEY_PATTERN.fullmatch(key))
-        if invalid_keys:
-            raise ValueError(
-                f"Invalid label key(s) {invalid_keys!r}: keys must match {self._LABEL_KEY_PATTERN.pattern}."
-            )
-        if effective_labels:
-            conditions.append(self._get_scenario_result_labels_condition(labels=effective_labels))
-        if cursor is not None:
-            cursor_id = uuid.UUID(cursor.scenario_result_id)
-            conditions.append(
-                or_(
-                    ScenarioResultEntry.timestamp < cursor.timestamp,
-                    and_(
-                        ScenarioResultEntry.timestamp == cursor.timestamp,
-                        ScenarioResultEntry.id < cursor_id,
-                    ),
-                )
-            )
-
-        statement = select(
-            ScenarioResultEntry.id,
-            ScenarioResultEntry.scenario_name,
-            ScenarioResultEntry.scenario_version,
-            ScenarioResultEntry.pyrit_version,
-            ScenarioResultEntry.scenario_identifier,
-            ScenarioResultEntry.objective_target_identifier,
-            ScenarioResultEntry.scenario_run_state,
-            ScenarioResultEntry.labels,
-            ScenarioResultEntry.timestamp,
-            self._get_scenario_started_at_expression().label("started_at"),
-            ScenarioResultEntry.completion_time,
-            ScenarioResultEntry.error_message,
-            ScenarioResultEntry.error_type,
-            *(
-                expression.label(label)
-                for expression, label in zip(
-                    self._get_scenario_history_plan_expressions(),
-                    ("scenario_registry_name", "plan_atomic_groups", "plan_seed_id_map"),
-                    strict=True,
-                )
-            ),
+        queries = _ScenarioHistoryQueries(memory=self)
+        records, has_more = queries.get_page(
+            scenario_names=scenario_names,
+            statuses=statuses,
+            labels=labels,
+            cursor=cursor,
+            limit=limit,
         )
-        if conditions:
-            statement = statement.where(and_(*conditions))
-        statement = statement.order_by(
-            ScenarioResultEntry.timestamp.desc(),
-            ScenarioResultEntry.id.desc(),
-        ).limit(limit + 1)
-        with closing(self.get_session()) as session:
-            rows = session.execute(statement).all()
-        page_rows = rows[:limit]
-
-        records = [
-            ScenarioHistoryRunRecord(
-                scenario_result_id=str(row.id),
-                scenario_name=row.scenario_name,
-                scenario_version=row.scenario_version,
-                pyrit_version=row.pyrit_version,
-                scenario_identifier=row.scenario_identifier or {},
-                objective_target_identifier=row.objective_target_identifier or {},
-                status=row.scenario_run_state,
-                labels=row.labels or {},
-                created_at=row.timestamp,
-                started_at=self._parse_scenario_started_at(raw_value=row.started_at),
-                completed_at=row.completion_time,
-                error_message=row.error_message,
-                error_type=row.error_type,
-                scenario_registry_name=row.scenario_registry_name,
-                plan_atomic_groups=row.plan_atomic_groups,
-                plan_seed_id_map=row.plan_seed_id_map,
-            )
-            for row in page_rows
-        ]
         aggregates = self.get_scenario_history_aggregates(
             scenario_result_ids=[record.scenario_result_id for record in records],
             plan_scenario_ids=[
                 record.scenario_result_id for record in records if record.plan_atomic_groups is not None
             ],
         )
-        return records, aggregates, len(rows) > limit
+        return records, aggregates, has_more
 
     def get_scenario_history_aggregates(
         self,
@@ -5441,13 +5416,9 @@ class MemoryInterface(abc.ABC):
         Returns:
             datetime | None: Aware start timestamp, or None for legacy or malformed values.
         """
-        if not isinstance(raw_value, str):
-            return None
-        try:
-            value = datetime.fromisoformat(raw_value)
-        except ValueError:
-            return None
-        return value if value.tzinfo is not None else None
+        from pyrit.memory._scenario_history import _parse_scenario_started_at
+
+        return _parse_scenario_started_at(raw_value=raw_value)
 
     def get_unique_scenario_labels(self) -> dict[str, list[str]]:
         """Return all unique label values across scenario results."""
@@ -5462,7 +5433,7 @@ class MemoryInterface(abc.ABC):
         for (labels,) in rows:
             if not isinstance(labels, dict):
                 continue
-            for key, value in labels.items():
+            for key, value in cast("Mapping[str, object]", labels).items():
                 if isinstance(value, str):
                     label_values.setdefault(key, set()).add(value)
         return {key: sorted(values) for key, values in sorted(label_values.items())}

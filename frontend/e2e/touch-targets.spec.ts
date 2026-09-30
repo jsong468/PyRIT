@@ -1,5 +1,7 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "./_fixtures";
 import { makeAddMessageResponse } from "./_attacks";
+import { READY_RUNTIME, READY_RUNTIME_STATUS } from "./_runtime";
+import { mockVersion } from "./_compatibility";
 import { makeTarget } from "./_targets";
 
 const MOBILE_VIEWPORT = { width: 390, height: 844 };
@@ -143,9 +145,14 @@ async function installTouchTargetMocks(page: Page): Promise<void> {
       await route.fulfill(jsonResponse({ isAdmin: true }));
       return;
     }
+    if (apiPath === "/runtime") {
+      await route.fulfill(jsonResponse(READY_RUNTIME));
+      return;
+    }
     if (apiPath === "/version") {
       await route.fulfill(
         jsonResponse({
+          ...mockVersion(),
           version: "touch-target-test",
           display: "touch-target-test",
           default_labels: {
@@ -177,6 +184,10 @@ async function installTouchTargetMocks(page: Page): Promise<void> {
           version: "touch-target-config-v1",
         })
       );
+      return;
+    }
+    if (apiPath === "/config/runtime" && method === "GET") {
+      await route.fulfill(jsonResponse(READY_RUNTIME_STATUS));
       return;
     }
     if (apiPath === "/initializers/settings" && method === "GET") {
@@ -583,6 +594,9 @@ test.describe("Mobile touch targets", () => {
     await expect(scoreMenuItems).toHaveCount(0);
     await page.keyboard.press("Escape");
     await expect(scoreStack).toHaveAttribute("aria-expanded", "false");
+    // Leave the restored trigger focus so its tooltip cannot cover the next control.
+    await scoreStack.press("Tab");
+    await expect(page.getByRole("tooltip")).toHaveCount(0);
 
     await expectMinimumTouchTargets(
       page.locator(
