@@ -57,6 +57,23 @@ gc_image = Image.open(gc_result.output_text)
 display(gc_image)
 
 # %% [markdown]
+# ### QRCodeConverter
+#
+# The `QRCodeConverter` encodes the prompt text into a QR code image, moving the payload off the text channel so it must be decoded from the image.
+
+# %%
+from pyrit.converter import QRCodeConverter
+
+qr_converter = QRCodeConverter()
+qr_result = await qr_converter.convert_async(prompt=prompt)  # type: ignore
+
+print(f"QR code saved to: {qr_result.output_text}")
+
+# Display the QR code
+qr_image = Image.open(qr_result.output_text)
+display(qr_image)
+
+# %% [markdown]
 # ### AddImageTextConverter
 #
 # The `AddImageTextConverter` takes text as input and creates an image with that text rendered on it:

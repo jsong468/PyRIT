@@ -167,36 +167,6 @@ class AddImageTextConverter(_BaseImageTextConverter):
             self._font_load_failed = True
             return cast("FreeTypeFont", ImageFont.load_default(size=size))
 
-    def _fit_text_to_box(self, *, text: str, box_width: int, box_height: int) -> tuple[FreeTypeFont, list[str]]:
-        """
-        Auto-size font from font_size_max down to font_size_min until text fits in the box.
-
-        Args:
-            text (str): The text to fit.
-            box_width (int): The box width in pixels.
-            box_height (int): The box height in pixels.
-
-        Returns:
-            tuple[FreeTypeFont, list[str]]: The chosen font and wrapped text lines.
-        """
-        usable_width = int(box_width * 0.95)
-        usable_height = int(box_height * 0.95)
-
-        for size in range(self._font_size_max, self._font_size_min - 1, -1):
-            font = self._load_font_at_size(size)
-            lines = self._wrap_text(text=text, font=font, max_width=usable_width)
-            line_height = self._get_line_height(font=font)
-            if len(lines) * line_height <= usable_height:
-                return font, lines
-
-        min_font = self._load_font_at_size(self._font_size_min)
-        lines = self._wrap_text(text=text, font=min_font, max_width=usable_width)
-        logger.warning(
-            f"Text does not fit in bounding box ({box_width}x{box_height}) even at minimum font size "
-            f"{self._font_size_min}. Text may be clipped."
-        )
-        return min_font, lines
-
     def _add_text_to_image(self, text: str) -> Image.Image:
         """
         Add wrapped text to the image at `self._img_to_add`.
@@ -224,7 +194,14 @@ class AddImageTextConverter(_BaseImageTextConverter):
 
         if self._auto_font_size:
             x1, y1, x2, y2 = bounding_box
-            font, lines = self._fit_text_to_box(text=text, box_width=x2 - x1, box_height=y2 - y1)
+            font, lines = self._fit_font_to_box(
+                text=text,
+                font_loader=self._load_font_at_size,
+                min_size=self._font_size_min,
+                max_size=self._font_size_max,
+                box_width=x2 - x1,
+                box_height=y2 - y1,
+            )
             overlay = self._draw_text_overlay(
                 lines=lines,
                 font=font,

@@ -52,7 +52,7 @@ class GridCompositeConverter(_BaseImageTextConverter):
         payload_background: Path | str | None = None,
         font_name: Path | None = None,
         color: tuple[int, int, int] = (0, 0, 0),
-        font_size: int = 20,
+        font_size: int | tuple[int, int] = (8, 20),
         random_seed: int = 42,
     ) -> None:
         """
@@ -75,7 +75,10 @@ class GridCompositeConverter(_BaseImageTextConverter):
             font_name (Path | None): Path of the font to use. Must be a TrueType font (.ttf).
                 Defaults to None, which uses Pillow's built-in default font.
             color (tuple[int, int, int]): Text color as RGB values. Defaults to (0, 0, 0).
-            font_size (int): Font size for the payload text. Defaults to 20.
+            font_size (int | tuple[int, int]): Font size for the payload text as a fixed int, or a
+                (min, max) tuple for automatic sizing that shrinks from max down to min to fit the
+                text in the cell. A long objective that overflows even at the minimum size logs a
+                warning rather than being silently clipped. Defaults to (8, 20).
             random_seed (int): Seed controlling the payload cell and innocuous-image selection.
                 Kept in the identifier so identical configurations produce identical composites.
                 Defaults to 42.
@@ -84,7 +87,7 @@ class GridCompositeConverter(_BaseImageTextConverter):
             ValueError: If ``grid_size`` or ``tile_size`` are not two positive integers, the grid
                 has fewer than two cells, ``innocuous_images`` is empty or too small,
                 ``payload_position`` is out of range, ``font_name`` is not a ``.ttf`` file, or
-                ``font_size`` is not positive.
+                ``font_size`` is not positive (or an invalid ``(min, max)`` range).
         """
         if len(grid_size) != 2 or grid_size[0] < 1 or grid_size[1] < 1:
             raise ValueError("grid_size must be a tuple of two positive integers (rows, cols)")
@@ -94,6 +97,8 @@ class GridCompositeConverter(_BaseImageTextConverter):
             raise ValueError("grid_size must describe at least two cells")
         if len(tile_size) != 2 or tile_size[0] < 1 or tile_size[1] < 1:
             raise ValueError("tile_size must be a tuple of two positive integers (width, height)")
+        if isinstance(innocuous_images, (str, Path)):
+            raise ValueError("innocuous_images must be a sequence of image paths, not a single path")
         if not innocuous_images:
             raise ValueError("Please provide a non-empty innocuous_images bank")
         num_innocuous = num_cells - 1
@@ -106,23 +111,33 @@ class GridCompositeConverter(_BaseImageTextConverter):
             raise ValueError(f"payload_position must be in [0, {num_cells}); got {payload_position}")
         if font_name is not None and Path(font_name).suffix.lower() != ".ttf":
             raise ValueError("The specified font must be a TrueType font with a .ttf extension")
-        if font_size < 1:
-            raise ValueError("font_size must be greater than 0")
+        if isinstance(font_size, tuple):
+            if len(font_size) != 2 or font_size[0] > font_size[1] or font_size[0] < 1:
+                raise ValueError("font_size tuple must be (min, max) with 1 <= min <= max")
+            self._font_size_min, self._font_size_max = font_size
+        else:
+            if font_size < 1:
+                raise ValueError("font_size must be greater than 0")
+            self._font_size_min = self._font_size_max = font_size
 
-        self._innocuous_images = [str(image) for image in innocuous_images]
+        self._innocuous_images = sorted(str(image) for image in innocuous_images)
         self._grid_size = grid_size
         self._tile_size = tile_size
         self._payload_background = str(payload_background) if payload_background is not None else None
         self._font_name = str(font_name) if font_name is not None else None
+        self._font_load_failed = font_name is None
         self._color = color
-        self._font_size = font_size
         self._random_seed = random_seed
-        self._font = self._load_font()
 
         # Resolve the payload cell and the innocuous subset once, deterministically, so every
-        # call with this configuration produces an identical composite.
+        # call with this configuration produces an identical composite. Draw the index
+        # unconditionally so the RNG stream (and thus the sampled subset) is the same whether or
+        # not ``payload_position`` was supplied, and sample from the sorted bank so selection does
+        # not depend on the argument order. Both make the composite a pure function of the
+        # identifier's fields.
         rng = random.Random(random_seed)
-        self._payload_index = payload_position if payload_position is not None else rng.randrange(num_cells)
+        drawn_index = rng.randrange(num_cells)
+        self._payload_index = payload_position if payload_position is not None else drawn_index
         self._selected_innocuous = rng.sample(self._innocuous_images, num_innocuous)
 
     def _build_identifier(self) -> ComponentIdentifier:
@@ -134,32 +149,37 @@ class GridCompositeConverter(_BaseImageTextConverter):
         """
         return self._create_identifier(
             params={
-                "innocuous_images": sorted(self._innocuous_images),
+                "innocuous_images": self._innocuous_images,
                 "grid_size": self._grid_size,
                 "tile_size": self._tile_size,
                 "payload_index": self._payload_index,
                 "payload_background": self._payload_background,
                 "font_name": self._font_name,
                 "color": self._color,
-                "font_size": self._font_size,
+                "font_size_min": self._font_size_min,
+                "font_size_max": self._font_size_max,
                 "random_seed": self._random_seed,
             }
         )
 
-    def _load_font(self) -> FreeTypeFont:
+    def _load_font_at_size(self, size: int) -> FreeTypeFont:
         """
-        Load the font at ``self._font_size``.
+        Load the font at a specific size.
+
+        Args:
+            size (int): The font size to load.
 
         Returns:
             FreeTypeFont: The loaded font object. Falls back to Pillow's built-in default font on error.
         """
-        if self._font_name is None:
-            return cast("FreeTypeFont", ImageFont.load_default(size=self._font_size))
+        if self._font_load_failed:
+            return cast("FreeTypeFont", ImageFont.load_default(size=size))
         try:
-            return ImageFont.truetype(self._font_name, self._font_size)
+            return ImageFont.truetype(self._font_name, size)  # type: ignore[ty:invalid-argument-type]
         except OSError:
             logger.warning(f"Cannot open font resource: {self._font_name}. Using Pillow built-in default font.")
-            return cast("FreeTypeFont", ImageFont.load_default(size=self._font_size))
+            self._font_load_failed = True
+            return cast("FreeTypeFont", ImageFont.load_default(size=size))
 
     @staticmethod
     async def _read_image_async(path: str) -> Image.Image:
@@ -205,20 +225,26 @@ class GridCompositeConverter(_BaseImageTextConverter):
             base = self._fit_tile(background)
         else:
             base = Image.new("RGB", self._tile_size, (255, 255, 255))
-        bounding_box = (
-            self._TEXT_MARGIN,
-            self._TEXT_MARGIN,
-            tile_width - self._TEXT_MARGIN,
-            tile_height - self._TEXT_MARGIN,
-        )
-        return self._render_text_on_image(
-            image=base,
+        x1 = y1 = self._TEXT_MARGIN
+        x2 = tile_width - self._TEXT_MARGIN
+        y2 = tile_height - self._TEXT_MARGIN
+        font, lines = self._fit_font_to_box(
             text=text,
-            font=self._font,
+            font_loader=self._load_font_at_size,
+            min_size=self._font_size_min,
+            max_size=self._font_size_max,
+            box_width=x2 - x1,
+            box_height=y2 - y1,
+        )
+        overlay = self._draw_text_overlay(
+            lines=lines,
+            font=font,
             color=self._color,
-            bounding_box=bounding_box,
+            box_width=x2 - x1,
+            box_height=y2 - y1,
             center_text=True,
         )
+        return self._composite_overlay(image=base, overlay=overlay, bounding_box=(x1, y1, x2, y2))
 
     def _compose(self, *, payload_tile: Image.Image, innocuous_tiles: list[Image.Image]) -> Image.Image:
         """

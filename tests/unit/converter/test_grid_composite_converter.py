@@ -2,6 +2,7 @@
 # Licensed under the MIT license.
 
 import os
+import pathlib
 
 import pytest
 from PIL import Image
@@ -43,6 +44,21 @@ def test_init_selection_is_seed_deterministic(innocuous_images):
     assert first._selected_innocuous == second._selected_innocuous
 
 
+def test_init_selection_independent_of_argument_order(innocuous_images):
+    forward = GridCompositeConverter(innocuous_images=innocuous_images, random_seed=7)
+    reversed_order = GridCompositeConverter(innocuous_images=list(reversed(innocuous_images)), random_seed=7)
+    assert forward._selected_innocuous == reversed_order._selected_innocuous
+    assert str(forward.get_identifier()) == str(reversed_order.get_identifier())
+
+
+def test_init_explicit_payload_position_preserves_selection(innocuous_images):
+    # An explicit payload_position must not shift the RNG stream, so the sampled subset
+    # matches the seed-drawn variant with the same seed.
+    drawn = GridCompositeConverter(innocuous_images=innocuous_images, random_seed=7)
+    explicit = GridCompositeConverter(innocuous_images=innocuous_images, payload_position=1, random_seed=7)
+    assert explicit._selected_innocuous == drawn._selected_innocuous
+
+
 def test_init_explicit_payload_position(innocuous_images):
     converter = GridCompositeConverter(innocuous_images=innocuous_images, payload_position=2)
     assert converter._payload_index == 2
@@ -71,6 +87,12 @@ def test_init_empty_bank_raises():
         GridCompositeConverter(innocuous_images=[])
 
 
+@pytest.mark.parametrize("single", ["lion.png", pathlib.Path("lion.png")])
+def test_init_single_path_raises(single):
+    with pytest.raises(ValueError, match="sequence of image paths"):
+        GridCompositeConverter(innocuous_images=single)
+
+
 def test_init_bank_too_small_raises(innocuous_images):
     with pytest.raises(ValueError, match="at least 3"):
         GridCompositeConverter(innocuous_images=innocuous_images[:2])
@@ -89,6 +111,24 @@ def test_init_invalid_font_raises(innocuous_images):
 def test_init_invalid_font_size_raises(innocuous_images):
     with pytest.raises(ValueError):
         GridCompositeConverter(innocuous_images=innocuous_images, font_size=0)
+
+
+@pytest.mark.parametrize("font_size", [(20, 10), (0, 10), (5, 10, 15)])
+def test_init_invalid_font_size_tuple_raises(innocuous_images, font_size):
+    with pytest.raises(ValueError):
+        GridCompositeConverter(innocuous_images=innocuous_images, font_size=font_size)
+
+
+def test_init_font_size_int_sets_fixed_range(innocuous_images):
+    converter = GridCompositeConverter(innocuous_images=innocuous_images, font_size=14)
+    assert converter._font_size_min == 14
+    assert converter._font_size_max == 14
+
+
+def test_init_font_size_tuple_sets_range(innocuous_images):
+    converter = GridCompositeConverter(innocuous_images=innocuous_images, font_size=(8, 24))
+    assert converter._font_size_min == 8
+    assert converter._font_size_max == 24
 
 
 def test_identifier_includes_layout_params(innocuous_images):
@@ -157,3 +197,12 @@ class TestConvertAsync:
         second = await converter.convert_async(prompt="same objective", input_type="text")
         with Image.open(first.output_text) as image_one, Image.open(second.output_text) as image_two:
             assert list(image_one.get_flattened_data()) == list(image_two.get_flattened_data())
+
+    async def test_convert_async_warns_when_text_overflows(self, innocuous_images, caplog):
+        # A very long objective in a tiny tile cannot fit even at the minimum font size, so the
+        # converter must warn rather than silently clip.
+        converter = GridCompositeConverter(innocuous_images=innocuous_images, tile_size=(60, 60), font_size=(8, 10))
+        with caplog.at_level("WARNING"):
+            result = await converter.convert_async(prompt="word " * 200, input_type="text")
+        assert os.path.exists(result.output_text)
+        assert any("does not fit" in message for message in caplog.messages)
