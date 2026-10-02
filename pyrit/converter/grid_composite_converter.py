@@ -2,22 +2,17 @@
 # Licensed under the MIT license.
 
 import base64
-import logging
 import random
 from collections.abc import Sequence
 from io import BytesIO
 from pathlib import Path
-from typing import cast
 
-from PIL import Image, ImageFont
-from PIL.ImageFont import FreeTypeFont
+from PIL import Image
 
 from pyrit.converter.base_image_text_converter import _BaseImageTextConverter
 from pyrit.converter.converter import ConverterResult
 from pyrit.memory import data_serializer_factory
 from pyrit.models import ComponentIdentifier, PromptDataType
-
-logger = logging.getLogger(__name__)
 
 
 class GridCompositeConverter(_BaseImageTextConverter):
@@ -61,7 +56,8 @@ class GridCompositeConverter(_BaseImageTextConverter):
         Args:
             innocuous_images (Sequence[Path | str]): Bank of benign image paths (or Azure Blob
                 URLs) to fill the non-payload cells. Must contain at least ``rows * cols - 1``
-                entries so every non-payload cell can be filled without repetition.
+                entries. Bank entries are sampled without replacement; duplicate paths are
+                treated as distinct entries and may therefore produce identical tiles.
             grid_size (tuple[int, int]): Grid layout as (rows, cols). Must contain at least two
                 cells. Defaults to (2, 2).
             tile_size (tuple[int, int]): Size of each cell as (width, height) in pixels; every
@@ -86,41 +82,45 @@ class GridCompositeConverter(_BaseImageTextConverter):
         Raises:
             ValueError: If ``grid_size`` or ``tile_size`` are not two positive integers, the grid
                 has fewer than two cells, ``innocuous_images`` is empty or too small,
-                ``payload_position`` is out of range, ``font_name`` is not a ``.ttf`` file, or
-                ``font_size`` is not positive (or an invalid ``(min, max)`` range).
+                ``payload_position`` is out of range, ``font_name`` is not a ``.ttf`` file,
+                ``color`` is not a valid RGB tuple, or ``font_size`` is not positive (or an
+                invalid ``(min, max)`` range).
         """
-        if len(grid_size) != 2 or grid_size[0] < 1 or grid_size[1] < 1:
+        if (
+            not isinstance(grid_size, tuple)
+            or len(grid_size) != 2
+            or not all(
+                isinstance(dimension, int) and not isinstance(dimension, bool) and dimension > 0
+                for dimension in grid_size
+            )
+        ):
             raise ValueError("grid_size must be a tuple of two positive integers (rows, cols)")
         rows, cols = grid_size
         num_cells = rows * cols
         if num_cells < 2:
             raise ValueError("grid_size must describe at least two cells")
-        if len(tile_size) != 2 or tile_size[0] < 1 or tile_size[1] < 1:
-            raise ValueError("tile_size must be a tuple of two positive integers (width, height)")
-        if isinstance(innocuous_images, (str, Path)):
-            raise ValueError("innocuous_images must be a sequence of image paths, not a single path")
-        if not innocuous_images:
-            raise ValueError("Please provide a non-empty innocuous_images bank")
-        num_innocuous = num_cells - 1
-        if len(innocuous_images) < num_innocuous:
-            raise ValueError(
-                f"innocuous_images must contain at least {num_innocuous} image(s) to fill the "
-                f"non-payload cells of a {rows}x{cols} grid; got {len(innocuous_images)}"
+        if (
+            not isinstance(tile_size, tuple)
+            or len(tile_size) != 2
+            or not all(
+                isinstance(dimension, int) and not isinstance(dimension, bool) and dimension > 0
+                for dimension in tile_size
             )
+        ):
+            raise ValueError("tile_size must be a tuple of two positive integers (width, height)")
+        num_innocuous = num_cells - 1
+        validated_innocuous_images = self._validate_innocuous_images(
+            innocuous_images=innocuous_images,
+            required_count=num_innocuous,
+            grid_size=grid_size,
+        )
         if payload_position is not None and not 0 <= payload_position < num_cells:
             raise ValueError(f"payload_position must be in [0, {num_cells}); got {payload_position}")
-        if font_name is not None and Path(font_name).suffix.lower() != ".ttf":
-            raise ValueError("The specified font must be a TrueType font with a .ttf extension")
-        if isinstance(font_size, tuple):
-            if len(font_size) != 2 or font_size[0] > font_size[1] or font_size[0] < 1:
-                raise ValueError("font_size tuple must be (min, max) with 1 <= min <= max")
-            self._font_size_min, self._font_size_max = font_size
-        else:
-            if font_size < 1:
-                raise ValueError("font_size must be greater than 0")
-            self._font_size_min = self._font_size_max = font_size
+        self._validate_font_name(font_name)
+        self._validate_color(color)
+        self._extract_font_size(font_size)
 
-        self._innocuous_images = sorted(str(image) for image in innocuous_images)
+        self._innocuous_images = validated_innocuous_images
         self._grid_size = grid_size
         self._tile_size = tile_size
         self._payload_background = str(payload_background) if payload_background is not None else None
@@ -139,6 +139,39 @@ class GridCompositeConverter(_BaseImageTextConverter):
         drawn_index = rng.randrange(num_cells)
         self._payload_index = payload_position if payload_position is not None else drawn_index
         self._selected_innocuous = rng.sample(self._innocuous_images, num_innocuous)
+
+    @staticmethod
+    def _validate_innocuous_images(
+        *,
+        innocuous_images: Sequence[Path | str],
+        required_count: int,
+        grid_size: tuple[int, int],
+    ) -> list[str]:
+        """
+        Validate and normalize the innocuous image bank.
+
+        Args:
+            innocuous_images (Sequence[Path | str]): Image paths or URLs used for non-payload cells.
+            required_count (int): Number of non-payload cells that must be filled.
+            grid_size (tuple[int, int]): Grid dimensions used in validation errors.
+
+        Returns:
+            list[str]: The normalized, deterministically sorted image bank.
+
+        Raises:
+            ValueError: If the bank is a single path, empty, or too small for the grid.
+        """
+        if isinstance(innocuous_images, (str, Path)):
+            raise ValueError("innocuous_images must be a sequence of image paths, not a single path")
+        if not innocuous_images:
+            raise ValueError("Please provide a non-empty innocuous_images bank")
+        if len(innocuous_images) < required_count:
+            rows, cols = grid_size
+            raise ValueError(
+                f"innocuous_images must contain at least {required_count} image(s) to fill the "
+                f"non-payload cells of a {rows}x{cols} grid; got {len(innocuous_images)}"
+            )
+        return sorted(str(image) for image in innocuous_images)
 
     def _build_identifier(self) -> ComponentIdentifier:
         """
@@ -161,25 +194,6 @@ class GridCompositeConverter(_BaseImageTextConverter):
                 "random_seed": self._random_seed,
             }
         )
-
-    def _load_font_at_size(self, size: int) -> FreeTypeFont:
-        """
-        Load the font at a specific size.
-
-        Args:
-            size (int): The font size to load.
-
-        Returns:
-            FreeTypeFont: The loaded font object. Falls back to Pillow's built-in default font on error.
-        """
-        if self._font_load_failed:
-            return cast("FreeTypeFont", ImageFont.load_default(size=size))
-        try:
-            return ImageFont.truetype(self._font_name, size)  # type: ignore[ty:invalid-argument-type]
-        except OSError:
-            logger.warning(f"Cannot open font resource: {self._font_name}. Using Pillow built-in default font.")
-            self._font_load_failed = True
-            return cast("FreeTypeFont", ImageFont.load_default(size=size))
 
     @staticmethod
     async def _read_image_async(path: str) -> Image.Image:

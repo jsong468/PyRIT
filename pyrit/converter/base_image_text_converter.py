@@ -5,8 +5,10 @@ import logging
 import string
 import textwrap
 from collections.abc import Callable
+from pathlib import Path
+from typing import cast
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 from PIL.ImageFont import FreeTypeFont
 
 from pyrit.converter.converter import Converter
@@ -18,9 +20,89 @@ class _BaseImageTextConverter(Converter):
     """
     Base class with shared text-on-image rendering utilities.
 
-    Provides word wrapping, line height measurement, overlay drawing,
-    and compositing used by both AddImageTextConverter and AddTextImageConverter.
+    Provides validation, font loading, word wrapping, overlay drawing, and
+    compositing used by image text converters.
     """
+
+    _font_name: str | None
+    _font_load_failed: bool
+    _font_size_min: int
+    _font_size_max: int
+    _auto_font_size: bool
+
+    @staticmethod
+    def _validate_font_name(font_name: Path | None) -> None:
+        """
+        Validate that a configured font uses the TrueType extension.
+
+        Args:
+            font_name (Path | None): The optional font path to validate.
+
+        Raises:
+            ValueError: If the font path does not use the ``.ttf`` extension.
+        """
+        if font_name is not None and Path(font_name).suffix.lower() != ".ttf":
+            raise ValueError("The specified font must be a TrueType font with a .ttf extension")
+
+    @staticmethod
+    def _validate_color(color: object) -> None:
+        """
+        Validate an RGB color tuple.
+
+        Args:
+            color (object): The value to validate.
+
+        Raises:
+            ValueError: If the value is not a three-integer RGB tuple in the range 0 through 255.
+        """
+        if (
+            not isinstance(color, tuple)
+            or len(color) != 3
+            or not all(isinstance(channel, int) and 0 <= channel <= 255 for channel in color)
+        ):
+            raise ValueError("color must be a tuple of three integers between 0 and 255")
+
+    def _extract_font_size(self, font_size: int | tuple[int, int]) -> None:
+        """
+        Parse a fixed font size or range into shared internal fields.
+
+        Args:
+            font_size (int | tuple[int, int]): Fixed size or (min, max) range.
+
+        Raises:
+            ValueError: If the fixed size is not positive or the tuple range is invalid.
+        """
+        if isinstance(font_size, tuple):
+            if len(font_size) != 2 or font_size[0] > font_size[1] or font_size[0] < 1:
+                raise ValueError("font_size tuple must be (min, max) with 1 <= min <= max")
+            self._font_size_min = font_size[0]
+            self._font_size_max = font_size[1]
+            self._auto_font_size = True
+        else:
+            if font_size < 1:
+                raise ValueError("font_size must be greater than 0")
+            self._font_size_min = font_size
+            self._font_size_max = font_size
+            self._auto_font_size = False
+
+    def _load_font_at_size(self, size: int) -> FreeTypeFont:
+        """
+        Load the configured font at a specific size.
+
+        Args:
+            size (int): The font size to load.
+
+        Returns:
+            FreeTypeFont: The loaded font, falling back to Pillow's built-in font on error.
+        """
+        if self._font_load_failed:
+            return cast("FreeTypeFont", ImageFont.load_default(size=size))
+        try:
+            return ImageFont.truetype(self._font_name, size)  # type: ignore[ty:invalid-argument-type]
+        except OSError:
+            logger.warning(f"Cannot open font resource: {self._font_name}. Using Pillow built-in default font.")
+            self._font_load_failed = True
+            return cast("FreeTypeFont", ImageFont.load_default(size=size))
 
     def _fit_font_to_box(
         self,

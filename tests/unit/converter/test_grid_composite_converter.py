@@ -71,15 +71,21 @@ def test_init_supported_types(innocuous_images):
     assert converter.output_supported("image_path") is True
 
 
-@pytest.mark.parametrize("grid_size", [(1, 1), (0, 2), (2, 0)])
+@pytest.mark.parametrize("grid_size", [(0, 2), (2, 0), (2.5, 2), (True, 2), [2, 2]])
 def test_init_invalid_grid_size_raises(innocuous_images, grid_size):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="grid_size must be a tuple of two positive integers"):
         GridCompositeConverter(innocuous_images=innocuous_images, grid_size=grid_size)
 
 
-def test_init_invalid_tile_size_raises(innocuous_images):
-    with pytest.raises(ValueError):
-        GridCompositeConverter(innocuous_images=innocuous_images, tile_size=(0, 100))
+def test_init_single_cell_grid_raises(innocuous_images):
+    with pytest.raises(ValueError, match="grid_size must describe at least two cells"):
+        GridCompositeConverter(innocuous_images=innocuous_images, grid_size=(1, 1))
+
+
+@pytest.mark.parametrize("tile_size", [(0, 100), (400.5, 400), (True, 400), [400, 400]])
+def test_init_invalid_tile_size_raises(innocuous_images, tile_size):
+    with pytest.raises(ValueError, match="tile_size must be a tuple of two positive integers"):
+        GridCompositeConverter(innocuous_images=innocuous_images, tile_size=tile_size)
 
 
 def test_init_empty_bank_raises():
@@ -106,6 +112,11 @@ def test_init_payload_position_out_of_range_raises(innocuous_images):
 def test_init_invalid_font_raises(innocuous_images):
     with pytest.raises(ValueError):
         GridCompositeConverter(innocuous_images=innocuous_images, font_name="helvetica.otf")
+
+
+def test_init_invalid_color_raises(innocuous_images):
+    with pytest.raises(ValueError, match="color must be a tuple of three integers between 0 and 255"):
+        GridCompositeConverter(innocuous_images=innocuous_images, color=(0, 0))
 
 
 def test_init_invalid_font_size_raises(innocuous_images):
