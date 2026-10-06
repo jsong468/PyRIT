@@ -61,5 +61,16 @@ scenario_result = await scenario.run_async()  # type: ignore
 await output_scenario_async(scenario_result)
 
 # %% [markdown]
+# ## ImageTechniqueAdaptive
+#
+# `ImageTechniqueAdaptive` is the image sibling of `TextAdaptive`. It renders each text objective
+# into an image (blank canvas, QR code, grid composite, comic panel, ...) and sends it to a
+# vision-capable target, then scores the text response. The objective target must accept **both text
+# and image input** (so the direct-text baseline stays a valid comparison) and return text — use a
+# multimodal target such as `openai_chat` (e.g. gpt-4o). See the
+# [Adaptive Scenarios programming guide](../code/scenarios/3_adaptive_scenarios.ipynb) for a full
+# walkthrough.
+
+# %% [markdown]
 # For more details, see the [Scenarios Programming Guide](../code/scenarios/0_scenarios.ipynb) and
 # [Configuration](../getting_started/configuration.md).
