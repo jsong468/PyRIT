@@ -95,7 +95,7 @@ from pyrit.setup import IN_MEMORY, initialize_pyrit_async
 await initialize_pyrit_async(memory_db_type=IN_MEMORY)  # type: ignore
 
 mcp_tools = MCPToolProvider.from_config_file(
-    config_path="doc/code/targets/supporting_assets/notes_mcp_config.json",
+    config_path="supporting_assets/notes_mcp_config.json",
     server_name="notes",
 )
 
