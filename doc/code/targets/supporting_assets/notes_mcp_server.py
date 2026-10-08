@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-"""A standalone MCP server example with in-memory notes."""
+"""A standalone MCP example with in-memory notes."""
 
 import argparse
 
@@ -18,7 +18,7 @@ def create_server() -> MCPServer[None]:
     server: MCPServer[None] = MCPServer("example-notes")
     notes = {"welcome": "Welcome to the example notebook."}
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+    @server.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False))
     def get_note(id: str) -> NoteText:
         """Read a note by ID. Unknown IDs return an error."""
         if id not in notes:
